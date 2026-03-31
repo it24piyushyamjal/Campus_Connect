@@ -1,4 +1,6 @@
-# Vite + React + shadcn-ui + TypeScript
+# CampusConnect
+
+## Vite + React + shadcn-ui + TypeScript
 
 This is a template for a project using Vite, React, shadcn-ui, and TypeScript.
 
