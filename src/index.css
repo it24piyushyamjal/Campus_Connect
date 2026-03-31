@@ -1,0 +1,136 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* CampusConnect Design System - Professional Education Theme */
+
+@layer base {
+  :root {
+    /* Core Brand Colors - Educational Blue Theme */
+    --background: 0 0% 100%;
+    --foreground: 220 13% 18%;
+
+    --card: 0 0% 100%;
+    --card-foreground: 220 13% 18%;
+
+    --popover: 0 0% 100%;
+    --popover-foreground: 220 13% 18%;
+
+    /* Primary - Education Blue */
+    --primary: 220 91% 48%;
+    --primary-foreground: 0 0% 100%;
+    --primary-hover: 220 91% 42%;
+    --primary-light: 220 91% 95%;
+
+    /* Secondary - Complementary Purple */
+    --secondary: 262 52% 47%;
+    --secondary-foreground: 0 0% 100%;
+    --secondary-light: 262 52% 95%;
+
+    /* Accent - Success Green */
+    --accent: 142 69% 58%;
+    --accent-foreground: 0 0% 100%;
+    --accent-light: 142 69% 95%;
+
+    /* Status Colors */
+    --success: 142 69% 58%;
+    --success-foreground: 0 0% 100%;
+    --warning: 38 92% 50%;
+    --warning-foreground: 0 0% 100%;
+    --destructive: 0 72% 51%;
+    --destructive-foreground: 0 0% 100%;
+
+    /* Neutral Colors */
+    --muted: 220 13% 96%;
+    --muted-foreground: 220 13% 46%;
+    --border: 220 13% 91%;
+    --input: 220 13% 91%;
+    --ring: 220 91% 48%;
+
+    /* Gradients */
+    --gradient-primary: linear-gradient(135deg, hsl(220 91% 48%), hsl(220 91% 42%));
+    --gradient-secondary: linear-gradient(135deg, hsl(262 52% 47%), hsl(280 52% 47%));
+    --gradient-hero: linear-gradient(135deg, hsl(220 91% 48%), hsl(262 52% 47%));
+    --gradient-card: linear-gradient(145deg, hsl(0 0% 100%), hsl(220 13% 98%));
+
+    /* Shadows */
+    --shadow-sm: 0 1px 2px 0 hsl(220 13% 18% / 0.05);
+    --shadow-md: 0 4px 6px -1px hsl(220 13% 18% / 0.1), 0 2px 4px -1px hsl(220 13% 18% / 0.06);
+    --shadow-lg: 0 10px 15px -3px hsl(220 13% 18% / 0.1), 0 4px 6px -2px hsl(220 13% 18% / 0.05);
+    --shadow-xl: 0 20px 25px -5px hsl(220 13% 18% / 0.1), 0 10px 10px -5px hsl(220 13% 18% / 0.04);
+
+    /* Animation */
+    --transition-all: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+    --transition-fast: all 0.15s cubic-bezier(0.4, 0, 0.2, 1);
+
+    --radius: 0.75rem;
+
+    /* Sidebar */
+    --sidebar-background: 220 91% 48%;
+    --sidebar-foreground: 0 0% 100%;
+    --sidebar-primary: 0 0% 100%;
+    --sidebar-primary-foreground: 220 91% 48%;
+    --sidebar-accent: 220 91% 42%;
+    --sidebar-accent-foreground: 0 0% 100%;
+    --sidebar-border: 220 91% 42%;
+    --sidebar-ring: 0 0% 100%;
+  }
+
+  .dark {
+    --background: 220 13% 9%;
+    --foreground: 0 0% 95%;
+
+    --card: 220 13% 12%;
+    --card-foreground: 0 0% 95%;
+
+    --popover: 220 13% 12%;
+    --popover-foreground: 0 0% 95%;
+
+    --primary: 220 91% 55%;
+    --primary-foreground: 220 13% 9%;
+    --primary-hover: 220 91% 50%;
+    --primary-light: 220 91% 15%;
+
+    --secondary: 262 52% 55%;
+    --secondary-foreground: 220 13% 9%;
+    --secondary-light: 262 52% 15%;
+
+    --accent: 142 69% 58%;
+    --accent-foreground: 220 13% 9%;
+    --accent-light: 142 69% 15%;
+
+    --success: 142 69% 58%;
+    --warning: 38 92% 50%;
+    --destructive: 0 72% 51%;
+
+    --muted: 220 13% 15%;
+    --muted-foreground: 220 13% 65%;
+    --border: 220 13% 18%;
+    --input: 220 13% 18%;
+    --ring: 220 91% 55%;
+
+    --gradient-primary: linear-gradient(135deg, hsl(220 91% 55%), hsl(220 91% 50%));
+    --gradient-secondary: linear-gradient(135deg, hsl(262 52% 55%), hsl(280 52% 55%));
+    --gradient-hero: linear-gradient(135deg, hsl(220 91% 55%), hsl(262 52% 55%));
+    --gradient-card: linear-gradient(145deg, hsl(220 13% 12%), hsl(220 13% 15%));
+
+    --sidebar-background: 220 13% 9%;
+    --sidebar-foreground: 0 0% 95%;
+    --sidebar-primary: 220 91% 55%;
+    --sidebar-primary-foreground: 220 13% 9%;
+    --sidebar-accent: 220 13% 15%;
+    --sidebar-accent-foreground: 0 0% 95%;
+    --sidebar-border: 220 13% 18%;
+    --sidebar-ring: 220 91% 55%;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+
+  body {
+    @apply bg-background text-foreground;
+  }
+}
