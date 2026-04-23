@@ -1,590 +1,472 @@
-import { useEffect, useMemo, useState } from "react";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { Progress } from "@/components/ui/progress";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { useAuth } from "@/contexts/AuthContext";
-import { supabase } from "@/lib/supabase";
-import { useAttendance } from "@/hooks/useAttendance";
-import type { AttendanceStatus, StudentWithStatus } from "@/types/attendance";
-import { Loader2 } from "lucide-react";
+import { useEffect, useMemo, useState } from 'react';
+import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
+import { Input } from '@/components/ui/input';
+import { Button } from '@/components/ui/button';
+import { useAuth } from '@/contexts/AuthContext';
+import { useAttendance } from '@/hooks/useAttendance';
+import type { AttendanceStatus } from '@/types/attendance';
+import type { FacultyLectureSlot } from '@/types/timetable';
+import { resolveAttendanceIdentifiers } from '@/services/attendanceService';
+import { Check, Clock3, Loader2, Search, Users, X } from 'lucide-react';
 
-interface AttendanceSummary {
-  id: string;
-  subject: string;
-  teacher: string;
-  totalClasses: number;
-  attended: number;
-  percentage: number;
-  lastAttended: string;
-}
+const DAYS = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'] as const;
+const toLocalISODate = (date: Date): string => {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+};
 
-interface SubjectOption {
-  id: string;
-  name: string;
-}
+const getDateForWeekdayThisWeek = (targetDayName: string): string => {
+  const current = new Date();
+  const currentDayIndex = current.getDay();
+  const dayIndices: Record<string, number> = {
+    Sunday: 0,
+    Monday: 1,
+    Tuesday: 2,
+    Wednesday: 3,
+    Thursday: 4,
+    Friday: 5,
+    Saturday: 6,
+  };
+
+  const targetIndex = dayIndices[targetDayName] ?? currentDayIndex;
+  const diff = targetIndex - currentDayIndex;
+
+  const targetDate = new Date(current);
+  targetDate.setDate(current.getDate() + diff);
+
+  return toLocalISODate(targetDate);
+};
+
+const formatDayDate = (dateStr: string): string => {
+  const localDate = new Date(`${dateStr}T00:00:00`);
+  return localDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+};
 
 export default function Attendance() {
   const { user } = useAuth();
-  const [selectedStudentId, setSelectedStudentId] = useState<string>("");
-  const [selectedClassId, setSelectedClassId] = useState<string>("");
-  const [studentClassMap, setStudentClassMap] = useState<Record<string, string>>({});
-  const [subjects, setSubjects] = useState<SubjectOption[]>([]);
-  const [selectedSubjectId, setSelectedSubjectId] = useState<string>("");
-  const [selectedDate, setSelectedDate] = useState<string>(new Date().toISOString().split("T")[0]);
-  const [selectedStatus, setSelectedStatus] = useState<AttendanceStatus>("present");
-  const [formMessage, setFormMessage] = useState<string | null>(null);
-  const [fallbackStudents, setFallbackStudents] = useState<StudentWithStatus[]>([]);
+  const [activeDay, setActiveDay] = useState<string>('Monday');
+  const [selectedLecture, setSelectedLecture] = useState<FacultyLectureSlot | null>(null);
+  const [search, setSearch] = useState('');
+  const [attendanceMap, setAttendanceMap] = useState<Record<string, AttendanceStatus>>({});
+  const [modalLoading, setModalLoading] = useState(false);
+  const [modalError, setModalError] = useState<string | null>(null);
+
   const {
+    lectures,
     students,
     existingAttendance,
-    attendanceSummary,
-    attendanceHistory,
+    loadingLectures,
     loadingStudents,
     loadingAttendance,
-    loadingSummary,
-    loadingHistory,
     error,
     success,
+    loadLectures,
     loadStudents,
     markAttendance,
-    loadStudentSummary,
-    loadStudentHistory,
     loadExistingAttendance,
   } = useAttendance();
 
-  const [currentAttendanceData, setCurrentAttendanceData] = useState<AttendanceSummary[]>([]);
-  const displayedStudents = students.length > 0 ? students : fallbackStudents;
-  const resolvedClassIdForSelectedStudent =
-    selectedClassId ||
-    studentClassMap[selectedStudentId] ||
-    attendanceHistory[0]?.class_id ||
-    "";
+  const selectedDate = useMemo(() => getDateForWeekdayThisWeek(activeDay), [activeDay]);
+  const currentLectures = useMemo(() => {
+    return lectures.filter((lecture) => (lecture.day || '').toLowerCase() === activeDay.toLowerCase());
+  }, [lectures, activeDay]);
 
   useEffect(() => {
-    const loadSubjects = async () => {
-      const { data, error: subjectsError } = await supabase
-        .from("subjects")
-        .select("id, name")
-        .order("name", { ascending: true });
-
-      const subjectOptions = (data ?? []).map((item) => ({
-        id: item.id,
-        name: item.name,
-      }));
-
-      if (subjectOptions.length > 0) {
-        setSubjects(subjectOptions);
-        return;
-      }
-
-      const { data: attendanceSubjectRows } = await supabase
-        .from("attendance")
-        .select("subject_id, subjects(name)")
-        .eq("faculty_id", user?.id ?? "");
-
-      const fallbackSubjectMap = new Map<string, SubjectOption>();
-      (attendanceSubjectRows ?? []).forEach((row) => {
-        const subject = Array.isArray(row.subjects) ? row.subjects[0] : row.subjects;
-        if (!row.subject_id || !subject?.name) {
-          return;
-        }
-        fallbackSubjectMap.set(row.subject_id, { id: row.subject_id, name: subject.name });
-      });
-
-      const fallbackSubjects = Array.from(fallbackSubjectMap.values());
-      if (fallbackSubjects.length > 0) {
-        setSubjects(fallbackSubjects);
-        return;
-      }
-
-      if (subjectsError?.code === "42501") {
-        setFormMessage("You don't have permission to read subjects. Please update subjects RLS policy.");
-        return;
-      }
-
-      setFormMessage("No subjects found. Add subjects in database first.");
-
-      setSubjects([]);
-    };
-
-    if (user?.role === "faculty") {
-      setFormMessage(null);
-      void loadSubjects();
+    const todayIndex = new Date().getDay();
+    if (todayIndex >= 1 && todayIndex <= 6) {
+      setActiveDay(DAYS[todayIndex - 1]);
     }
-  }, [user?.id, user?.role]);
+  }, []);
 
   useEffect(() => {
-    const initializeAttendance = async () => {
-      if (!user) return;
-
-      const loadFallbackStudents = async () => {
-        const { data: profileData } = await supabase
-          .from("profiles")
-          .select("id, full_name")
-          .eq("role", "student")
-          .order("full_name", { ascending: true });
-
-        const profileStudents: StudentWithStatus[] = (profileData ?? []).map((student) => ({
-          student_id: student.id,
-          full_name: student.full_name ?? "Unknown Student",
-          status: null,
-        }));
-
-        if (profileStudents.length > 0) {
-          setFallbackStudents(profileStudents);
-          return;
-        }
-
-        const { data: classStudentData } = await supabase
-          .from("class_students")
-          .select("student_id, profiles(full_name)");
-
-        const classStudents: StudentWithStatus[] = (classStudentData ?? []).map((row) => {
-          const profile = Array.isArray(row.profiles) ? row.profiles[0] : row.profiles;
-          return {
-            student_id: row.student_id,
-            full_name: profile?.full_name ?? "Unknown Student",
-            status: null,
-          };
-        });
-
-        if (classStudents.length > 0) {
-          setFallbackStudents(classStudents);
-          return;
-        }
-
-        const { data: attendanceStudents } = await supabase
-          .from("attendance")
-          .select("student_id, profiles!attendance_student_id_fkey(full_name)")
-          .eq("faculty_id", user.id)
-          .order("date", { ascending: false });
-
-        const dedupedFromAttendance = Array.from(
-          new Map(
-            (attendanceStudents ?? []).map((row) => {
-              const profile = Array.isArray(row.profiles) ? row.profiles[0] : row.profiles;
-              const fullName = profile?.full_name ?? "Unknown Student";
-              return [
-                row.student_id,
-                {
-                  student_id: row.student_id,
-                  full_name: fullName,
-                  status: null,
-                } as StudentWithStatus,
-              ];
-            }),
-          ).values(),
-        );
-
-        setFallbackStudents(dedupedFromAttendance);
-      };
-
-      if (user.role === "student") {
-        await Promise.all([loadStudentSummary(user.id), loadStudentHistory(user.id)]);
-        return;
-      }
-
-      const { data, error: classError } = await supabase
-        .from("attendance")
-        .select("class_id")
-        .eq("faculty_id", user.id)
-        .limit(1)
-        .maybeSingle<{ class_id: string }>();
-
-      if (classError || !data?.class_id) {
-        await loadFallbackStudents();
-        return;
-      }
-
-      setSelectedClassId(data.class_id);
-      await loadStudents(data.class_id);
-      await loadFallbackStudents();
-    };
-
-    void initializeAttendance();
-  }, [user]);
-
-  useEffect(() => {
-    if (user?.role === "faculty" && selectedStudentId) {
-      void Promise.all([
-        loadStudentSummary(selectedStudentId),
-        loadStudentHistory(selectedStudentId),
-      ]);
-    }
-  }, [selectedStudentId, user?.role, loadStudentSummary, loadStudentHistory]);
-
-  useEffect(() => {
-    const resolveClassForSelectedStudent = async () => {
-      if (user?.role !== "faculty" || !selectedStudentId) {
-        return;
-      }
-
-      const { data } = await supabase
-        .from("class_students")
-        .select("class_id")
-        .eq("student_id", selectedStudentId)
-        .limit(1)
-        .maybeSingle<{ class_id: string }>();
-
-      if (data?.class_id) {
-        setSelectedClassId(data.class_id);
-      }
-    };
-
-    void resolveClassForSelectedStudent();
-  }, [selectedStudentId, user?.role]);
-
-  useEffect(() => {
-    if (user?.role === "faculty" && displayedStudents.length > 0 && !selectedStudentId) {
-      setSelectedStudentId(displayedStudents[0].student_id);
-    }
-  }, [displayedStudents, selectedStudentId, user?.role]);
-
-  useEffect(() => {
-    const loadStudentClassMappings = async () => {
-      if (user?.role !== "faculty" || displayedStudents.length === 0) {
-        return;
-      }
-
-      const studentIds = displayedStudents.map((student) => student.student_id);
-      const { data } = await supabase
-        .from("class_students")
-        .select("student_id, class_id")
-        .in("student_id", studentIds);
-
-      const nextMap = (data ?? []).reduce<Record<string, string>>((acc, row) => {
-        if (!acc[row.student_id]) {
-          acc[row.student_id] = row.class_id;
-        }
-        return acc;
-      }, {});
-
-      setStudentClassMap(nextMap);
-    };
-
-    void loadStudentClassMappings();
-  }, [displayedStudents, user?.role]);
-
-  useEffect(() => {
-    const latest = attendanceHistory[0];
-    const classId = resolvedClassIdForSelectedStudent;
-    if (!latest || !classId) {
+    if (!user?.id || user.role !== 'faculty') {
       return;
     }
 
-    void loadExistingAttendance({
-      class_id: classId,
-      subject_id: latest.subject_id,
-      date: latest.date,
-    });
-  }, [attendanceHistory, resolvedClassIdForSelectedStudent, loadExistingAttendance]);
+    void loadLectures(user.id, activeDay, selectedDate);
+  }, [user?.id, user?.role, activeDay, selectedDate, loadLectures]);
 
   useEffect(() => {
-    const classId = resolvedClassIdForSelectedStudent;
-    if (!classId || !selectedSubjectId || !selectedDate) {
+    if (!selectedLecture) {
       return;
     }
 
-    void loadExistingAttendance({
-      class_id: classId,
-      subject_id: selectedSubjectId,
-      date: selectedDate,
-    });
-  }, [resolvedClassIdForSelectedStudent, selectedSubjectId, selectedDate, loadExistingAttendance]);
-
-  useEffect(() => {
-    const matchedRecord = existingAttendance.find((row) => row.student_id === selectedStudentId);
-    if (matchedRecord) {
-      setSelectedStatus(matchedRecord.status);
-    }
-  }, [existingAttendance, selectedStudentId]);
-
-  useEffect(() => {
-    const lastAttendedBySubject = attendanceHistory.reduce<Record<string, string>>((acc, item) => {
-      if (!acc[item.subject_id]) {
-        acc[item.subject_id] = item.date;
-      }
+    const existingMap = existingAttendance.reduce<Record<string, AttendanceStatus>>((acc, row) => {
+      acc[row.student_id] = row.status;
       return acc;
     }, {});
 
-    const mappedData: AttendanceSummary[] = attendanceSummary.map((item) => ({
-      id: item.subject_id,
-      subject: item.subject_name,
-      teacher: "N/A",
-      totalClasses: item.total_classes,
-      attended: item.present_count,
-      percentage: item.percentage,
-      lastAttended: lastAttendedBySubject[item.subject_id] ?? new Date().toISOString(),
-    }));
+    const nextMap = students.reduce<Record<string, AttendanceStatus>>((acc, student) => {
+      acc[student.student_id] = existingMap[student.student_id] ?? 'present';
+      return acc;
+    }, {});
 
-    setCurrentAttendanceData(mappedData);
-  }, [attendanceSummary, attendanceHistory]);
+    setAttendanceMap(nextMap);
+  }, [selectedLecture, students, existingAttendance]);
 
-  const loading = loadingStudents || loadingSummary || loadingHistory;
-
-  const handleMarkAttendance = async () => {
-    setFormMessage(null);
-
-    if (!user || user.role !== "faculty") {
-      setFormMessage("Only faculty can mark attendance.");
-      return;
+  const filteredStudents = useMemo(() => {
+    const query = search.toLowerCase().trim();
+    if (!query) {
+      return students;
     }
 
-    const classId = resolvedClassIdForSelectedStudent;
-
-    if (!selectedStudentId || !selectedSubjectId || !selectedDate) {
-      setFormMessage("Select student, subject and date before saving attendance.");
-      return;
-    }
-
-    if (!classId) {
-      setFormMessage("Selected student is not mapped to any class.");
-      return;
-    }
-
-    await markAttendance([
-      {
-        student_id: selectedStudentId,
-        faculty_id: user.id,
-        class_id: classId,
-        subject_id: selectedSubjectId,
-        date: selectedDate,
-        status: selectedStatus,
-      },
-    ]);
-
-    await loadExistingAttendance({
-      class_id: classId,
-      subject_id: selectedSubjectId,
-      date: selectedDate,
+    return students.filter((student) => {
+      return (
+        student.full_name.toLowerCase().includes(query) || student.roll_no.toLowerCase().includes(query)
+      );
     });
+  }, [students, search]);
 
-    await Promise.all([
-      loadStudentSummary(selectedStudentId),
-      loadStudentHistory(selectedStudentId),
-    ]);
+  const presentCount = useMemo(() => {
+    return Object.values(attendanceMap).filter((status) => status === 'present').length;
+  }, [attendanceMap]);
+
+  const handleLectureClick = async (lecture: FacultyLectureSlot) => {
+    if (!user?.id) {
+      return;
+    }
+
+    const classLookupValue = lecture.class_id?.trim() || lecture.class_name?.trim();
+    if (!classLookupValue) {
+      console.error('Missing class identifier for lecture', lecture);
+      return;
+    }
+
+    setSearch('');
+    setSelectedLecture(lecture);
+    setModalLoading(true);
+    setModalError(null);
+
+    try {
+      await loadStudents(classLookupValue);
+
+      let resolvedIds = null;
+      try {
+        resolvedIds = await resolveAttendanceIdentifiers({
+          lecture_id: lecture.id,
+          class_id: lecture.class_id,
+          class_name: lecture.class_name,
+          subject_id: lecture.subject_id,
+          subject_name: lecture.subject_name,
+          faculty_id: user.id,
+        });
+      } catch (resolveError) {
+        console.error('Failed to resolve attendance identifiers for prefill', resolveError);
+      }
+
+      if (resolvedIds) {
+        await loadExistingAttendance({
+          class_id: resolvedIds.class_id,
+          subject_id: resolvedIds.subject_id,
+          date: selectedDate,
+          faculty_id: resolvedIds.faculty_id,
+        });
+      } else {
+        console.error('Skipping existing attendance prefill due to invalid UUIDs', {
+          class_id: lecture.class_id,
+          subject_id: lecture.subject_id,
+          faculty_id: user.id,
+        });
+      }
+    } catch (loadError) {
+      console.error('Failed to load attendance modal data', loadError);
+      setModalError('Failed to load students for this lecture.');
+    } finally {
+      setModalLoading(false);
+    }
   };
 
-  const selectedStudent = useMemo(
-    () => displayedStudents.find((student) => student.student_id === selectedStudentId) || null,
-    [displayedStudents, selectedStudentId]
-  );
-
-  const getAttendanceBadge = (percentage: number) => {
-    if (percentage >= 90) return "default";
-    if (percentage >= 80) return "secondary";
-    return "destructive";
+  const handleMarkAll = (status: AttendanceStatus) => {
+    setAttendanceMap((previous) => {
+      const next = { ...previous };
+      filteredStudents.forEach((student) => {
+        next[student.student_id] = status;
+      });
+      return next;
+    });
   };
 
-  const getAttendanceStatus = (percentage: number) => {
-    if (percentage >= 90) return "Excellent";
-    if (percentage >= 80) return "Good";
-    if (percentage >= 75) return "Warning";
-    return "Critical";
+  const toggleStudent = (studentId: string, status: AttendanceStatus) => {
+    setAttendanceMap((previous) => ({
+      ...previous,
+      [studentId]: status,
+    }));
   };
 
-  const overallAttendance = useMemo(() => {
-    if (currentAttendanceData.length === 0) return 0;
-    return Math.round(
-      currentAttendanceData.reduce((sum, subject) => sum + subject.percentage, 0) / currentAttendanceData.length
+  const handleSaveAttendance = async () => {
+    if (!selectedLecture || !user?.id) {
+      return;
+    }
+
+    try {
+      setModalError(null);
+
+      const resolvedIds = await resolveAttendanceIdentifiers({
+        lecture_id: selectedLecture.id,
+        class_id: selectedLecture.class_id,
+        class_name: selectedLecture.class_name,
+        subject_id: selectedLecture.subject_id,
+        subject_name: selectedLecture.subject_name,
+        faculty_id: user.id,
+      });
+
+      if (!resolvedIds) {
+        setModalError('Unable to map class/subject IDs for this lecture.');
+        return;
+      }
+
+      const rows = students.map((student) => ({
+        student_id: student.student_id,
+        status: attendanceMap[student.student_id] ?? 'present',
+      }));
+
+      await markAttendance({
+        class_id: resolvedIds.class_id,
+        subject_id: resolvedIds.subject_id,
+        faculty_id: resolvedIds.faculty_id,
+        date: selectedDate,
+        rows,
+      });
+
+      await Promise.all([
+        loadExistingAttendance({
+          class_id: resolvedIds.class_id,
+          subject_id: resolvedIds.subject_id,
+          date: selectedDate,
+          faculty_id: resolvedIds.faculty_id,
+        }),
+        loadLectures(user.id, activeDay, selectedDate),
+      ]);
+
+      setSelectedLecture(null);
+    } catch (saveError) {
+      console.error('Failed to submit attendance', saveError);
+      const message =
+        saveError instanceof Error && saveError.message.trim()
+          ? saveError.message
+          : 'Failed to submit attendance. Please try again.';
+      setModalError(message);
+    }
+  };
+
+  if (!user || user.role !== 'faculty') {
+    return (
+      <Card>
+        <CardHeader>
+          <CardTitle>Attendance Module</CardTitle>
+        </CardHeader>
+        <CardContent className="text-muted-foreground">
+          Faculty access is required to mark attendance.
+        </CardContent>
+      </Card>
     );
-  }, [currentAttendanceData]);
+  }
 
   return (
     <div className="space-y-6">
       <div>
         <h1 className="text-3xl font-bold text-foreground">Attendance</h1>
-        <p className="text-muted-foreground">
-          {user?.role === 'faculty' ? 'View student attendance records' : 'Track your class attendance records'}
-        </p>
-      </div>
-
-      {/* Faculty Student Selection */}
-      {user?.role === 'faculty' && (
-        <Card>
-          <CardHeader>
-            <CardTitle>Select Student</CardTitle>
-          </CardHeader>
-          <CardContent>
-            <div className="space-y-4">
-              <Select value={selectedStudentId} onValueChange={setSelectedStudentId}>
-                <SelectTrigger className="w-full md:w-[300px]">
-                  <SelectValue placeholder="Select a student" />
-                </SelectTrigger>
-                <SelectContent>
-                  {displayedStudents.map((student) => (
-                    <SelectItem key={student.student_id} value={student.student_id}>
-                      {student.full_name}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-
-              <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
-                <Select value={selectedSubjectId} onValueChange={setSelectedSubjectId}>
-                  <SelectTrigger>
-                    <SelectValue placeholder="Select subject" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {subjects.map((subject) => (
-                      <SelectItem key={subject.id} value={subject.id}>
-                        {subject.name}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-
-                <Input
-                  type="date"
-                  value={selectedDate}
-                  onChange={(event) => setSelectedDate(event.target.value)}
-                />
-
-                <Select
-                  value={selectedStatus}
-                  onValueChange={(value) => setSelectedStatus(value as AttendanceStatus)}
-                >
-                  <SelectTrigger>
-                    <SelectValue placeholder="Status" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="present">Present</SelectItem>
-                    <SelectItem value="absent">Absent</SelectItem>
-                  </SelectContent>
-                </Select>
-
-                <Button onClick={() => void handleMarkAttendance()} disabled={loadingAttendance}>
-                  {loadingAttendance ? "Saving..." : "Save Attendance"}
-                </Button>
-              </div>
-
-              {(formMessage || success) && (
-                <p className={`text-sm ${formMessage ? "text-destructive" : "text-emerald-600"}`}>
-                  {formMessage ?? success}
-                </p>
-              )}
-            </div>
-          </CardContent>
-        </Card>
-      )}
-
-      {loading && (
-        <Card>
-          <CardContent className="py-8 flex items-center justify-center">
-            <Loader2 className="h-6 w-6 animate-spin text-primary" />
-          </CardContent>
-        </Card>
-      )}
-
-      {error && (
-        <Card>
-          <CardContent className="py-6 text-center text-destructive">{error}</CardContent>
-        </Card>
-      )}
-
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-        <Card>
-          <CardHeader className="pb-3">
-            <CardTitle className="text-sm font-medium">Overall Attendance</CardTitle>
-          </CardHeader>
-          <CardContent>
-            <div className="text-2xl font-bold text-foreground">{overallAttendance}%</div>
-            <Progress value={overallAttendance} className="mt-2" />
-            <p className="text-xs text-muted-foreground mt-2">
-              Status: <Badge variant={getAttendanceBadge(overallAttendance)}>
-                {getAttendanceStatus(overallAttendance)}
-              </Badge>
-            </p>
-          </CardContent>
-        </Card>
-
-        <Card>
-          <CardHeader className="pb-3">
-            <CardTitle className="text-sm font-medium">Total Classes</CardTitle>
-          </CardHeader>
-          <CardContent>
-            <div className="text-2xl font-bold text-foreground">
-              {currentAttendanceData.reduce((sum, subject) => sum + subject.totalClasses, 0)}
-            </div>
-            <p className="text-xs text-muted-foreground mt-2">
-              Across all subjects
-            </p>
-          </CardContent>
-        </Card>
-
-        <Card>
-          <CardHeader className="pb-3">
-            <CardTitle className="text-sm font-medium">Classes Attended</CardTitle>
-          </CardHeader>
-          <CardContent>
-            <div className="text-2xl font-bold text-foreground">
-              {currentAttendanceData.reduce((sum, subject) => sum + subject.attended, 0)}
-            </div>
-            <p className="text-xs text-muted-foreground mt-2">
-              Total attended classes
-            </p>
-          </CardContent>
-        </Card>
+        <p className="text-muted-foreground">Select a lecture and mark attendance from live roster data.</p>
       </div>
 
       <Card>
-        <CardHeader>
-          <CardTitle>
-            {user?.role === 'faculty' ? `Attendance - ${selectedStudent?.full_name || 'Student'}` : 'Subject-wise Attendance'}
-          </CardTitle>
-        </CardHeader>
-        <CardContent>
-          <Table>
-            <TableHeader>
-              <TableRow>
-                <TableHead>Subject</TableHead>
-                <TableHead>Teacher</TableHead>
-                <TableHead>Attended/Total</TableHead>
-                <TableHead>Percentage</TableHead>
-                <TableHead>Status</TableHead>
-                <TableHead>Last Attended</TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {currentAttendanceData.length > 0 ? (
-                currentAttendanceData.map((record) => (
-                  <TableRow key={record.id}>
-                    <TableCell className="font-medium">{record.subject}</TableCell>
-                    <TableCell>{record.teacher}</TableCell>
-                    <TableCell>
-                      {record.attended}/{record.totalClasses}
-                    </TableCell>
-                    <TableCell>
-                      <div className="flex items-center space-x-2">
-                        <span>{record.percentage}%</span>
-                        <Progress value={record.percentage} className="w-16" />
-                      </div>
-                    </TableCell>
-                    <TableCell>
-                      <Badge variant={getAttendanceBadge(record.percentage)}>
-                        {getAttendanceStatus(record.percentage)}
-                      </Badge>
-                    </TableCell>
-                    <TableCell className="text-muted-foreground">
-                      {new Date(record.lastAttended).toLocaleDateString()}
-                    </TableCell>
-                  </TableRow>
-                ))
-              ) : (
-                <TableRow>
-                  <TableCell colSpan={6} className="text-center text-muted-foreground py-8">
-                    No attendance records found
-                  </TableCell>
-                </TableRow>
-              )}
-            </TableBody>
-          </Table>
+        <CardContent className="pt-6">
+          <div className="flex flex-wrap gap-2">
+            {DAYS.map((day) => {
+              const isActive = activeDay === day;
+              return (
+                <Button
+                  key={day}
+                  variant={isActive ? 'default' : 'outline'}
+                  size="sm"
+                  onClick={() => setActiveDay(day)}
+                >
+                  {day}
+                </Button>
+              );
+            })}
+          </div>
         </CardContent>
       </Card>
+
+      {error && (
+        <Card>
+          <CardContent className="py-4 text-destructive">{error}</CardContent>
+        </Card>
+      )}
+
+      {success && (
+        <Card>
+          <CardContent className="py-4 text-emerald-600">{success}</CardContent>
+        </Card>
+      )}
+
+      <div className="flex items-center justify-between">
+        <h2 className="text-lg font-semibold text-foreground">{activeDay}'s Lectures</h2>
+        <span className="text-xs font-semibold text-muted-foreground">{formatDayDate(selectedDate)}</span>
+      </div>
+
+      {loadingLectures ? (
+        <Card>
+          <CardContent className="py-10 flex justify-center">
+            <Loader2 className="h-6 w-6 animate-spin text-primary" />
+          </CardContent>
+        </Card>
+      ) : currentLectures.length === 0 ? (
+        <Card>
+          <CardContent className="py-10 text-center text-muted-foreground">No lectures found for this day.</CardContent>
+        </Card>
+      ) : (
+        <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
+          {currentLectures.map((lecture) => (
+            <button
+              key={lecture.id}
+              onClick={() => void handleLectureClick(lecture)}
+              className={`text-left rounded-lg border p-4 transition-colors ${
+                lecture.is_marked ? 'border-emerald-300 bg-emerald-50/40' : 'border-border bg-card hover:bg-muted/40'
+              }`}
+            >
+              <div className="flex items-start justify-between gap-3">
+                <h3 className="font-semibold text-foreground">{lecture.subject_name}</h3>
+                {lecture.is_marked && (
+                  <span className="inline-flex items-center gap-1 rounded-md bg-emerald-100 px-2 py-1 text-[11px] font-semibold text-emerald-700">
+                    <Check className="h-3 w-3" /> Marked
+                  </span>
+                )}
+              </div>
+
+              <div className="mt-3 space-y-1 text-sm text-muted-foreground">
+                <p className="flex items-center gap-2">
+                  <Users className="h-4 w-4" /> {lecture.class_name}
+                </p>
+                <p className="flex items-center gap-2">
+                  <Clock3 className="h-4 w-4" /> {lecture.time_slot.replace('-', '–')}
+                </p>
+                <p className="text-xs">{lecture.room}</p>
+              </div>
+
+              <div className="mt-4 border-t pt-3 text-xs font-semibold text-primary">
+                {lecture.is_marked ? 'Tap to edit attendance' : 'Tap to mark attendance'}
+              </div>
+            </button>
+          ))}
+        </div>
+      )}
+
+      {selectedLecture && (
+        <div className="fixed inset-0 z-50 bg-black/50 backdrop-blur-sm flex items-end sm:items-center justify-center">
+          <div className="bg-card w-full sm:max-w-3xl max-h-[90vh] rounded-t-2xl sm:rounded-2xl border shadow-xl flex flex-col">
+            <div className="p-4 sm:p-6 border-b flex items-start justify-between gap-3">
+              <div>
+                <h3 className="text-xl font-bold text-foreground">{selectedLecture.subject_name}</h3>
+                <p className="mt-1 text-sm text-muted-foreground flex items-center gap-3">
+                  <span>{selectedLecture.class_name}</span>
+                  <span>•</span>
+                  <span>{selectedLecture.time_slot.replace('-', '–')}</span>
+                  <span>•</span>
+                  <span>{formatDayDate(selectedDate)}</span>
+                </p>
+              </div>
+              <Button variant="ghost" size="icon" onClick={() => setSelectedLecture(null)}>
+                <X className="h-4 w-4" />
+              </Button>
+            </div>
+
+            <div className="p-4 sm:p-6 border-b space-y-3">
+              {modalError && (
+                <div className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+                  {modalError}
+                </div>
+              )}
+              <div className="relative">
+                <Search className="h-4 w-4 absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
+                <Input
+                  value={search}
+                  onChange={(event) => setSearch(event.target.value)}
+                  className="pl-9"
+                  placeholder="Search by name or roll no"
+                />
+              </div>
+
+              <div className="flex flex-wrap gap-2">
+                <Button variant="outline" onClick={() => handleMarkAll('present')}>Mark All Present</Button>
+                <Button variant="outline" onClick={() => handleMarkAll('absent')}>Mark All Absent</Button>
+              </div>
+            </div>
+
+            <div className="flex-1 overflow-y-auto p-3 sm:p-4 bg-muted/30">
+              {(modalLoading || loadingStudents || loadingAttendance) ? (
+                <div className="py-10 flex justify-center">
+                  <Loader2 className="h-6 w-6 animate-spin text-primary" />
+                </div>
+              ) : filteredStudents.length === 0 ? (
+                <div className="py-10 text-center text-muted-foreground">No students found.</div>
+              ) : (
+                <div className="space-y-2">
+                  {filteredStudents.map((student) => {
+                    const status = attendanceMap[student.student_id] ?? 'present';
+                    const isPresent = status === 'present';
+
+                    return (
+                      <div
+                        key={student.student_id}
+                        className="bg-card border rounded-lg p-3 flex items-center justify-between gap-3"
+                      >
+                        <div>
+                          <p className="font-semibold text-foreground">{student.full_name}</p>
+                          <p className="text-xs text-muted-foreground">{student.roll_no}</p>
+                        </div>
+
+                        <div className="flex items-center rounded-md border p-1 bg-muted/60">
+                          <button
+                            onClick={() => toggleStudent(student.student_id, 'present')}
+                            className={`px-3 py-1.5 text-xs font-semibold rounded ${
+                              isPresent ? 'bg-emerald-500 text-white' : 'text-muted-foreground'
+                            }`}
+                          >
+                            P
+                          </button>
+                          <button
+                            onClick={() => toggleStudent(student.student_id, 'absent')}
+                            className={`px-3 py-1.5 text-xs font-semibold rounded ${
+                              !isPresent ? 'bg-rose-500 text-white' : 'text-muted-foreground'
+                            }`}
+                          >
+                            A
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+
+            <div className="p-4 sm:p-6 border-t flex flex-col sm:flex-row items-center justify-between gap-4">
+              <div className="flex items-center gap-6 w-full sm:w-auto">
+                <div>
+                  <p className="text-[11px] uppercase text-muted-foreground font-semibold">Present</p>
+                  <p className="text-xl font-bold text-emerald-600">{presentCount}</p>
+                </div>
+                <div>
+                  <p className="text-[11px] uppercase text-muted-foreground font-semibold">Absent</p>
+                  <p className="text-xl font-bold text-rose-600">{students.length - presentCount}</p>
+                </div>
+                <div>
+                  <p className="text-[11px] uppercase text-muted-foreground font-semibold">Total</p>
+                  <p className="text-xl font-bold text-foreground">{students.length}</p>
+                </div>
+              </div>
+
+              <Button className="w-full sm:w-auto" onClick={() => void handleSaveAttendance()} disabled={loadingAttendance || students.length === 0}>
+                {selectedLecture.is_marked ? 'Update Attendance' : 'Submit Attendance'}
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

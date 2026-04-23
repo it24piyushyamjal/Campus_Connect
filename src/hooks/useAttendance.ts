@@ -3,39 +3,34 @@ import {
   fetchStudentsByClass,
   submitAttendance,
   fetchExistingAttendance,
-  fetchStudentAttendanceSummary,
-  fetchStudentAttendanceHistory,
 } from '@/services/attendanceService';
 import type {
   StudentWithStatus,
   AttendanceRecord,
-  AttendanceInsert,
+  LectureAttendancePayload,
   AttendanceFilters,
-  StudentAttendanceSummary,
 } from '@/types/attendance';
+import { fetchFacultyLectureSlotsByDay } from '@/services/timetableService';
+import type { FacultyLectureSlot } from '@/types/timetable';
 
 interface UseAttendanceState {
+  lectures: FacultyLectureSlot[];
   students: StudentWithStatus[];
   existingAttendance: AttendanceRecord[];
-  attendanceSummary: StudentAttendanceSummary[];
-  attendanceHistory: (AttendanceRecord & { subject_name: string })[];
+  loadingLectures: boolean;
   loadingStudents: boolean;
   loadingAttendance: boolean;
-  loadingSummary: boolean;
-  loadingHistory: boolean;
   error: string | null;
   success: string | null;
 }
 
 interface UseAttendanceActions {
+  loadLectures: (facultyId: string, day: string, date: string) => Promise<void>;
   loadStudents: (class_id: string) => Promise<void>;
-  markAttendance: (records: AttendanceInsert[]) => Promise<void>;
+  markAttendance: (payload: LectureAttendancePayload) => Promise<void>;
   loadExistingAttendance: (filters: AttendanceFilters) => Promise<void>;
-  loadStudentSummary: (student_id: string) => Promise<void>;
-  loadStudentHistory: (student_id: string) => Promise<void>;
+  refreshLectures: () => Promise<void>;
   refreshStudents: () => Promise<void>;
-  refreshSummary: () => Promise<void>;
-  refreshHistory: () => Promise<void>;
   clearError: () => void;
   clearSuccess: () => void;
 }
@@ -48,22 +43,17 @@ export type UseAttendanceReturn = UseAttendanceState & UseAttendanceActions;
  * @returns Object containing state and action functions
  */
 export function useAttendance(): UseAttendanceReturn {
+  const [lectures, setLectures] = useState<FacultyLectureSlot[]>([]);
   const [students, setStudents] = useState<StudentWithStatus[]>([]);
   const [existingAttendance, setExistingAttendance] = useState<AttendanceRecord[]>([]);
-  const [attendanceSummary, setAttendanceSummary] = useState<StudentAttendanceSummary[]>([]);
-  const [attendanceHistory, setAttendanceHistory] = useState<
-    (AttendanceRecord & { subject_name: string })[]
-  >([]);
+  const [loadingLectures, setLoadingLectures] = useState(false);
   const [loadingStudents, setLoadingStudents] = useState(false);
   const [loadingAttendance, setLoadingAttendance] = useState(false);
-  const [loadingSummary, setLoadingSummary] = useState(false);
-  const [loadingHistory, setLoadingHistory] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
 
+  const lastLectureFiltersRef = useRef<{ facultyId: string; day: string; date: string } | null>(null);
   const lastClassIdRef = useRef<string | null>(null);
-  const lastSummaryStudentIdRef = useRef<string | null>(null);
-  const lastHistoryStudentIdRef = useRef<string | null>(null);
 
   const clearError = useCallback(() => setError(null), []);
   const clearSuccess = useCallback(() => setSuccess(null), []);
@@ -102,9 +92,21 @@ export function useAttendance(): UseAttendanceReturn {
     [getErrorMessage],
   );
 
-  /**
-   * Load all students for a given class
-   */
+  const loadLectures = useCallback(
+    async (facultyId: string, day: string, date: string): Promise<void> => {
+      lastLectureFiltersRef.current = { facultyId, day, date };
+      setSuccess(null);
+
+      await runTask(
+        () => fetchFacultyLectureSlotsByDay(facultyId, day, date),
+        setLoadingLectures,
+        (data) => setLectures(data),
+        { fallbackError: 'Failed to load lecture slots.' },
+      );
+    },
+    [runTask],
+  );
+
   const loadStudents = useCallback(
     async (class_id: string): Promise<void> => {
       lastClassIdRef.current = class_id;
@@ -124,20 +126,22 @@ export function useAttendance(): UseAttendanceReturn {
    * Submit attendance records (insert or update)
    */
   const markAttendance = useCallback(
-    async (records: AttendanceInsert[]): Promise<void> => {
+    async (payload: LectureAttendancePayload): Promise<void> => {
+      setLoadingAttendance(true);
+      setError(null);
       setSuccess(null);
 
-      await runTask(
-        () => submitAttendance(records),
-        setLoadingAttendance,
-        undefined,
-        {
-          fallbackError: 'Failed to mark attendance',
-          successMessage: 'Attendance marked successfully',
-        },
-      );
+      try {
+        await submitAttendance(payload);
+        setSuccess('Attendance saved successfully');
+      } catch (err) {
+        setError(getErrorMessage(err, 'Failed to mark attendance'));
+        throw err;
+      } finally {
+        setLoadingAttendance(false);
+      }
     },
-    [runTask],
+    [getErrorMessage],
   );
 
   /**
@@ -145,6 +149,7 @@ export function useAttendance(): UseAttendanceReturn {
    */
   const loadExistingAttendance = useCallback(
     async (filters: AttendanceFilters): Promise<void> => {
+      setExistingAttendance([]);
       await runTask(
         () => fetchExistingAttendance(filters),
         setLoadingAttendance,
@@ -155,39 +160,17 @@ export function useAttendance(): UseAttendanceReturn {
     [runTask],
   );
 
-  /**
-   * Load attendance summary for a student (grouped by subject)
-   */
-  const loadStudentSummary = useCallback(
-    async (student_id: string): Promise<void> => {
-      lastSummaryStudentIdRef.current = student_id;
-
-      await runTask(
-        () => fetchStudentAttendanceSummary(student_id),
-        setLoadingSummary,
-        (data) => setAttendanceSummary(data),
-        { fallbackError: 'Failed to load summary' },
-      );
-    },
-    [runTask],
-  );
-
-  /**
-   * Load full attendance history for a student (ordered by date)
-   */
-  const loadStudentHistory = useCallback(
-    async (student_id: string): Promise<void> => {
-      lastHistoryStudentIdRef.current = student_id;
-
-      await runTask(
-        () => fetchStudentAttendanceHistory(student_id),
-        setLoadingHistory,
-        (data) => setAttendanceHistory(data),
-        { fallbackError: 'Failed to load history' },
-      );
-    },
-    [runTask],
-  );
+  const refreshLectures = useCallback(async (): Promise<void> => {
+    if (!lastLectureFiltersRef.current) {
+      setError('No lecture filters selected to refresh.');
+      return;
+    }
+    await loadLectures(
+      lastLectureFiltersRef.current.facultyId,
+      lastLectureFiltersRef.current.day,
+      lastLectureFiltersRef.current.date,
+    );
+  }, [loadLectures]);
 
   const refreshStudents = useCallback(async (): Promise<void> => {
     if (!lastClassIdRef.current) {
@@ -197,41 +180,21 @@ export function useAttendance(): UseAttendanceReturn {
     await loadStudents(lastClassIdRef.current);
   }, [loadStudents]);
 
-  const refreshSummary = useCallback(async (): Promise<void> => {
-    if (!lastSummaryStudentIdRef.current) {
-      setError('No student selected to refresh summary.');
-      return;
-    }
-    await loadStudentSummary(lastSummaryStudentIdRef.current);
-  }, [loadStudentSummary]);
-
-  const refreshHistory = useCallback(async (): Promise<void> => {
-    if (!lastHistoryStudentIdRef.current) {
-      setError('No student selected to refresh history.');
-      return;
-    }
-    await loadStudentHistory(lastHistoryStudentIdRef.current);
-  }, [loadStudentHistory]);
-
   return {
+    lectures,
     students,
     existingAttendance,
-    attendanceSummary,
-    attendanceHistory,
+    loadingLectures,
     loadingStudents,
     loadingAttendance,
-    loadingSummary,
-    loadingHistory,
     error,
     success,
+    loadLectures,
     loadStudents,
     markAttendance,
     loadExistingAttendance,
-    loadStudentSummary,
-    loadStudentHistory,
+    refreshLectures,
     refreshStudents,
-    refreshSummary,
-    refreshHistory,
     clearError,
     clearSuccess,
   };

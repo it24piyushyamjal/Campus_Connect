@@ -1,29 +1,19 @@
 import { supabase } from '@/lib/supabase';
 import type {
   AttendanceRecord,
-  AttendanceInsert,
+  AttendanceRecordInsert,
   AttendanceFilters,
+  LectureAttendancePayload,
   StudentWithStatus,
-  StudentAttendanceSummary,
 } from '@/types/attendance';
 
-// Type definitions for Supabase responses
-interface ClassStudentRow {
-  student_id: string;
-  profiles: { full_name: string } | { full_name: string }[] | null;
+interface ProfileRow {
+  id: string;
+  full_name: string | null;
+  email: string | null;
+  class?: string | null;
 }
 
-interface AttendanceSummaryRow {
-  subject_id: string;
-  status: 'present' | 'absent' | null;
-  subjects: { name: string } | null;
-}
-
-interface AttendanceHistoryRow extends AttendanceRecord {
-  subjects: { name: string } | null;
-}
-
-// Custom error class for service layer
 class AttendanceServiceError extends Error {
   constructor(
     message: string,
@@ -55,78 +45,198 @@ const handleError = (error: unknown): never => {
   throw new AttendanceServiceError(message);
 };
 
-/**
- * Fetch all students enrolled in a class with their basic info
- * @param class_id - The class ID to fetch students for
- * @returns Array of students with status (initially null)
- * @throws AttendanceServiceError if class_id is invalid or no students found
- */
+const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+const isUuid = (value: string): boolean => UUID_REGEX.test(value);
+
+export interface AttendanceIdentifierInput {
+  lecture_id?: string | null;
+  class_id?: string | null;
+  class_name?: string | null;
+  subject_id?: string | null;
+  subject_name?: string | null;
+  faculty_id?: string | null;
+}
+
+export interface ResolvedAttendanceIdentifiers {
+  class_id: string;
+  subject_id: string;
+  faculty_id: string;
+}
+
+export async function resolveAttendanceIdentifiers(
+  input: AttendanceIdentifierInput,
+): Promise<ResolvedAttendanceIdentifiers | null> {
+  const normalizeText = (value: string | null | undefined): string =>
+    (value ?? '').trim().replace(/\s+/g, ' ');
+
+  const resolveIdByName = async (
+    table: 'classes' | 'subjects',
+    name: string,
+  ): Promise<string> => {
+    const cleanedName = normalizeText(name);
+    if (!cleanedName) return '';
+
+    const exact = await supabase
+      .from(table)
+      .select('id')
+      .eq('name', cleanedName)
+      .maybeSingle<{ id: string }>();
+
+    if (exact.error) throw exact.error;
+    if (exact.data?.id) return exact.data.id;
+
+    const fuzzy = await supabase
+      .from(table)
+      .select('id')
+      .ilike('name', `%${cleanedName}%`)
+      .limit(1);
+
+    if (fuzzy.error) throw fuzzy.error;
+    return fuzzy.data?.[0]?.id ?? '';
+  };
+
+  const classId = input.class_id?.trim() ?? '';
+  const subjectId = input.subject_id?.trim() ?? '';
+  const facultyId = input.faculty_id?.trim() ?? '';
+
+  if (!isUuid(facultyId)) {
+    return null;
+  }
+
+  let resolvedClassId = classId;
+  if (!isUuid(resolvedClassId)) {
+    const className = normalizeText(input.class_name);
+    if (className) {
+      resolvedClassId = await resolveIdByName('classes', className);
+    }
+  }
+
+  let resolvedSubjectId = subjectId;
+  if (!isUuid(resolvedSubjectId)) {
+    const subjectName = normalizeText(input.subject_name);
+    if (subjectName) {
+      resolvedSubjectId = await resolveIdByName('subjects', subjectName);
+    }
+  }
+
+  if ((!isUuid(resolvedClassId) || !isUuid(resolvedSubjectId)) && input.lecture_id?.trim()) {
+    const { data: timetableRow, error: timetableError } = await supabase
+      .from('timetable')
+      .select('class_id, subject_id, class, subject')
+      .eq('id', input.lecture_id.trim())
+      .maybeSingle<{
+        class_id?: string | null;
+        subject_id?: string | null;
+        class?: string | null;
+        subject?: string | null;
+      }>();
+
+    if (timetableError) throw timetableError;
+
+    if (!isUuid(resolvedClassId)) {
+      const timetableClassId = timetableRow?.class_id?.trim() ?? '';
+      if (isUuid(timetableClassId)) {
+        resolvedClassId = timetableClassId;
+      } else {
+        resolvedClassId = await resolveIdByName('classes', normalizeText(timetableRow?.class));
+      }
+    }
+
+    if (!isUuid(resolvedSubjectId)) {
+      const timetableSubjectId = timetableRow?.subject_id?.trim() ?? '';
+      if (isUuid(timetableSubjectId)) {
+        resolvedSubjectId = timetableSubjectId;
+      } else {
+        resolvedSubjectId = await resolveIdByName('subjects', normalizeText(timetableRow?.subject));
+      }
+    }
+  }
+
+  if (!isUuid(resolvedClassId) || !isUuid(resolvedSubjectId)) {
+    return null;
+  }
+
+  return {
+    class_id: resolvedClassId,
+    subject_id: resolvedSubjectId,
+    faculty_id: facultyId,
+  };
+}
+
 export async function fetchStudentsByClass(class_id: string): Promise<StudentWithStatus[]> {
   try {
     if (!class_id?.trim()) {
       throw new AttendanceServiceError('Class ID is required.');
     }
 
-    const { data, error } = await supabase
-      .from('class_students')
-      .select('student_id, profiles(full_name)')
-      .eq('class_id', class_id);
+    const normalizedClassInput = class_id.trim();
+    let classNameForQuery = normalizedClassInput;
 
-    if (error) throw error;
+    // If a UUID is received from lecture, resolve class name first.
+    if (isUuid(normalizedClassInput)) {
+      const { data: classRow, error: classLookupError } = await supabase
+        .from('classes')
+        .select('name')
+        .eq('id', normalizedClassInput)
+        .maybeSingle<{ name: string }>();
 
-    if (!data || data.length === 0) {
-      throw new AttendanceServiceError('No students found for this class.');
+      if (classLookupError) throw classLookupError;
+      if (!classRow?.name) {
+        return [];
+      }
+      classNameForQuery = classRow.name;
     }
 
-    return data.map((row: any) => {
-      const profiles = Array.isArray(row.profiles) ? row.profiles[0] : row.profiles;
-      const fullName = profiles?.full_name ?? 'Unknown Student';
+    const { data: profiles, error: profilesError } = await supabase
+      .from('profiles')
+      .select('id, full_name, email, class')
+      .eq('role', 'student')
+      .eq('class', classNameForQuery)
+      .order('full_name', { ascending: true });
+
+    if (profilesError) throw profilesError;
+
+    let matchedProfiles = (profiles as ProfileRow[] | null) ?? [];
+
+    if (matchedProfiles.length === 0) {
+      const { data: fallbackProfiles, error: fallbackProfilesError } = await supabase
+        .from('profiles')
+        .select('id, full_name, email, class')
+        .eq('role', 'student')
+        .ilike('class', classNameForQuery)
+        .order('full_name', { ascending: true });
+
+      if (fallbackProfilesError) throw fallbackProfilesError;
+      matchedProfiles = (fallbackProfiles as ProfileRow[] | null) ?? [];
+    }
+
+    const mappedStudents = matchedProfiles.map((profile) => {
       return {
-        student_id: row.student_id,
-        full_name: fullName,
-        status: null,
+        student_id: profile.id,
+        full_name: profile?.full_name?.trim() || 'Unknown',
+        roll_no: profile?.email || '',
+        status: 'absent' as const,
       };
     });
+
+    return mappedStudents;
   } catch (error) {
     handleError(error);
   }
 }
 
-/**
- * Submit or update attendance records in batch
- * Uses upsert to handle both new and existing records
- * @param records - Array of attendance records to submit
- * @throws AttendanceServiceError if records array is empty or operation fails
- */
-export async function submitAttendance(records: AttendanceInsert[]): Promise<void> {
+export async function fetchExistingAttendance(
+  filters: AttendanceFilters,
+): Promise<AttendanceRecord[]> {
   try {
-    if (!records || records.length === 0) {
-      throw new AttendanceServiceError('No attendance records to submit.');
-    }
-
-    const { error } = await supabase
-      .from('attendance')
-      .upsert(records, {
-        onConflict: 'student_id,subject_id,date',
-      });
-
-    if (error) throw error;
-  } catch (error) {
-    handleError(error);
-  }
-}
-
-/**
- * Fetch existing attendance records for specific filters
- * Used to pre-fill UI with previously marked records
- * @param filters - Object containing class_id, subject_id, and date
- * @returns Array of existing attendance records (empty array if none found)
- * @throws AttendanceServiceError if required filters are missing
- */
-export async function fetchExistingAttendance(filters: AttendanceFilters): Promise<AttendanceRecord[]> {
-  try {
-    if (!filters.class_id?.trim() || !filters.subject_id?.trim() || !filters.date?.trim()) {
-      throw new AttendanceServiceError('Class ID, subject ID, and date are required.');
+    if (
+      !filters.class_id?.trim() ||
+      !filters.subject_id?.trim() ||
+      !filters.date?.trim() ||
+      !filters.faculty_id?.trim()
+    ) {
+      throw new AttendanceServiceError('Class ID, subject ID, date and faculty ID are required.');
     }
 
     const { data, error } = await supabase
@@ -134,119 +244,49 @@ export async function fetchExistingAttendance(filters: AttendanceFilters): Promi
       .select('*')
       .eq('class_id', filters.class_id)
       .eq('subject_id', filters.subject_id)
-      .eq('date', filters.date);
+      .eq('date', filters.date)
+      .eq('faculty_id', filters.faculty_id);
 
     if (error) throw error;
 
-    return (data as AttendanceRecord[]) || [];
+    return (data as AttendanceRecord[]) ?? [];
   } catch (error) {
     handleError(error);
   }
 }
 
-/**
- * Fetch aggregated attendance summary grouped by subject
- * Calculates attendance percentage per subject
- * @param student_id - The student ID to fetch summary for
- * @returns Array of attendance summaries per subject
- * @throws AttendanceServiceError if student_id is invalid or no records found
- */
-export async function fetchStudentAttendanceSummary(
-  student_id: string,
-): Promise<StudentAttendanceSummary[]> {
+export async function submitAttendance(payload: LectureAttendancePayload): Promise<void> {
   try {
-    if (!student_id?.trim()) {
-      throw new AttendanceServiceError('Student ID is required.');
+    if (!payload.rows.length) {
+      throw new AttendanceServiceError('No attendance rows provided.');
     }
 
-    const { data, error } = await supabase
-      .from('attendance')
-      .select('subject_id, status, subjects(name)')
-      .eq('student_id', student_id);
-
-    if (error) throw error;
-
-    if (!data || data.length === 0) {
-      throw new AttendanceServiceError('No attendance records found for this student.');
-    }
-
-    const grouped = data.reduce<Record<string, StudentAttendanceSummary>>((acc, record) => {
-      const row = record as unknown as AttendanceSummaryRow;
-      const subjectId = row.subject_id;
-      const subjectName = row.subjects?.name ?? 'Unknown Subject';
-
-      if (!acc[subjectId]) {
-        acc[subjectId] = {
-          subject_id: subjectId,
-          subject_name: subjectName,
-          total_classes: 0,
-          present_count: 0,
-          absent_count: 0,
-          percentage: 0,
-        };
-      }
-
-      acc[subjectId].total_classes += 1;
-      if (row.status === 'present') {
-        acc[subjectId].present_count += 1;
-      } else if (row.status === 'absent') {
-        acc[subjectId].absent_count += 1;
-      }
-
-      return acc;
-    }, {});
-
-    return Object.values(grouped).map((summary) => ({
-      ...summary,
-      percentage:
-        summary.total_classes > 0
-          ? Math.round((summary.present_count / summary.total_classes) * 1000) / 10
-          : 0,
+    const insertRows: AttendanceRecordInsert[] = payload.rows.map((row) => ({
+      student_id: row.student_id,
+      faculty_id: payload.faculty_id,
+      class_id: payload.class_id,
+      subject_id: payload.subject_id,
+      date: payload.date,
+      status: row.status,
     }));
+
+    const { error: upsertError } = await supabase
+      .from('attendance')
+      .upsert(insertRows, {
+        onConflict: 'student_id,subject_id,date',
+      })
+      .select('id');
+
+    if (upsertError) throw upsertError;
   } catch (error) {
     handleError(error);
   }
 }
 
-/**
- * Fetch complete attendance history for a student
- * Includes subject names and ordered by date descending
- * @param student_id - The student ID to fetch history for
- * @returns Array of attendance records with subject details
- * @throws AttendanceServiceError if student_id is invalid
- */
-export async function fetchStudentAttendanceHistory(
-  student_id: string,
-): Promise<(AttendanceRecord & { subject_name: string })[]> {
-  try {
-    if (!student_id?.trim()) {
-      throw new AttendanceServiceError('Student ID is required.');
-    }
+export async function fetchStudentAttendanceSummary(): Promise<never> {
+  throw new AttendanceServiceError('Student attendance summary is not implemented in this module.');
+}
 
-    const { data, error } = await supabase
-      .from('attendance')
-      .select('*, subjects(name)')
-      .eq('student_id', student_id)
-      .order('date', { ascending: false });
-
-    if (error) throw error;
-
-    return (data || []).map((record) => {
-      const row = record as unknown as AttendanceHistoryRow;
-      return {
-        id: row.id,
-        student_id: row.student_id,
-        faculty_id: row.faculty_id,
-        class_id: row.class_id,
-        subject_id: row.subject_id,
-        date: row.date,
-        status: row.status,
-        created_at: row.created_at,
-        updated_at: row.updated_at,
-        subject_name: row.subjects?.name ?? 'Unknown Subject',
-      };
-    });
-  } catch (error) {
-    handleError(error);
-  }
+export async function fetchStudentAttendanceHistory(): Promise<never> {
+  throw new AttendanceServiceError('Student attendance history is not implemented in this module.');
 }
